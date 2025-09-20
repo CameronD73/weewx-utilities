@@ -5,6 +5,10 @@ gw1000.py
 
 A WeeWX driver for devices using the Ecowitt LAN/Wi-Fi Gateway API.
 
+This driver should be considered end-of-life, as it has been supplanted for most
+use cases by the ecowitt_http driver. The only need for this driver should be
+for use with the original model GW1000, which is not supported by the ecowitt_http driver.
+
 The WeeWX Ecowitt Gateway driver (known historically as the 'WeeWX GW1000
 driver') utilises the Ecowitt LAN/Wi-Fi Gateway API and device HTTP requests to
 pull data from the gateway device. This is in contrast to the push methodology
@@ -22,7 +26,7 @@ The Ecowitt Gateway driver can be operated as a traditional WeeWX driver where
 it is the source of loop data or it can be operated as a WeeWX service where it
 is used to augment loop data produced by another driver.
 
-Copyright (C) 2020-2024 Gary Roderick                   gjroderick<at>gmail.com
+Copyright (C) 2020-2024 Gary Roderick
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -36,10 +40,15 @@ PARTICULAR PURPOSE.  See the GNU General Public License for more details.
 You should have received a copy of the GNU General Public License along with
 this program.  If not, see https://www.gnu.org/licenses/.
 
-Version: 0.6.3                                     Date: 2 August 2024
+Version: 0.7.0                                     Date: 15 Sep 2025
 
 Revision History
-    2 August 2024          `v0.6.3
+    15 Sep 2025         v0.7.0
+        - removed compatibility code, so this will only run with Python 3
+        - specifically removed use of "six" module, due to its removal from
+            the standard Debian 13 installation
+        - removed Weewx version 3 logging
+    2 August 2024          v0.6.3
         -   added support for WS85 sensor array
         -   added support for WH46 air quality sensor
         -   gateway device discovery is now based on monitoring port 59387 on
@@ -355,13 +364,11 @@ for more in-depth installation and configuration information.
 # TODO. Where should IP address, port and MAC be properties
 
 # Python imports
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import calendar
 import configobj
 import json
+import queue
 import re
 import socket
 import struct
@@ -369,12 +376,10 @@ import threading
 import time
 from operator import itemgetter
 
-# Python 2/3 compatibility shims
-import six
-from six.moves import StringIO
-from six.moves import urllib
-from six.moves.urllib.error import URLError
-from six.moves.urllib.parse import urlencode
+from io import StringIO
+from  urllib.error import URLError as URLError
+from  urllib.parse import urlencode as urlencode
+import urllib.request
 
 # WeeWX imports
 import weecfg
@@ -386,7 +391,7 @@ import weewx.wxformulas
 from weeutil.weeutil import timestamp_to_string
 
 # import/setup logging, WeeWX v3 is syslog based but WeeWX v4 is logging based,
-# try v4 logging and if it fails use v3 logging
+# try v4 logging and if it fails then crash
 try:
     # WeeWX4 logging
     import logging
@@ -415,37 +420,11 @@ try:
     def log_traceback_debug(prefix=''):
         log_traceback(log.debug, prefix=prefix)
 
-except ImportError:
-    # WeeWX legacy (v3) logging via syslog
-    import syslog
-    from weeutil.weeutil import log_traceback
-
-    def logmsg(level, msg):
-        syslog.syslog(level, 'gw1000: %s' % msg)
-
-    def logdbg(msg):
-        logmsg(syslog.LOG_DEBUG, msg)
-
-    def loginf(msg):
-        logmsg(syslog.LOG_INFO, msg)
-
-    def logerr(msg):
-        logmsg(syslog.LOG_ERR, msg)
-
-    # log_traceback() generates the same output but the signature and code is
-    # different between v3 and v4. We only need log_traceback at the log.error
-    # level so define a suitable wrapper function.
-    def log_traceback_critical(prefix=''):
-        log_traceback(prefix=prefix, loglevel=syslog.LOG_CRIT)
-
-    def log_traceback_error(prefix=''):
-        log_traceback(prefix=prefix, loglevel=syslog.LOG_ERR)
-
-    def log_traceback_debug(prefix=''):
-        log_traceback(prefix=prefix, loglevel=syslog.LOG_DEBUG)
+except ImportError as ioe:
+    raise Exception("replaced V3 logging code") from ioe
 
 DRIVER_NAME = 'GW1000'
-DRIVER_VERSION = '0.6.3'
+DRIVER_VERSION = '0.7.0'
 
 # various defaults used throughout
 # default port used by device
@@ -1275,7 +1254,7 @@ class Gateway(object):
             # over it and changing it
             field_map_copy = dict(field_map)
             # iterate over each key, value pair in the copy of the field map
-            for k, v in six.iteritems(field_map_copy):
+            for k, v in field_map_copy.items():
                 # if the 'value' (ie the device field) is in the field map
                 # extensions we will be mapping that device field elsewhere so
                 # pop that field map entry out of the field map so we don't end
@@ -1292,7 +1271,7 @@ class Gateway(object):
         # initialise the key that maps 'datetime'
         d_key = None
         # iterate over the field map entries
-        for k, v in six.iteritems(field_map):
+        for k, v in field_map.items():
             # if the mapping is for 'datetime' save the key and break
             if v == 'datetime':
                 d_key = k
@@ -1317,7 +1296,7 @@ class Gateway(object):
         # parsed device API data uses the METRICWX unit system
         _result = {'usUnits': weewx.METRICWX}
         # iterate over each of the key, value pairs in the field map
-        for weewx_field, data_field in six.iteritems(self.field_map):
+        for weewx_field, data_field in self.field_map.items():
             # if the field to be mapped exists in the data obtain it's
             # value and map it to the packet
             if data_field in data:
@@ -1338,7 +1317,7 @@ class Gateway(object):
         msg_list = []
         # iterate over our rain_field_map keys (the 'WeeWX' fields) and values
         # (the 'device' fields) we are interested in
-        for weewx_field, gw_field in six.iteritems(Gateway.rain_field_map):
+        for weewx_field, gw_field in Gateway.rain_field_map.items():
             # do we have a 'WeeWX' field of interest
             if weewx_field in data:
                 # we do so add some formatted output to our list
@@ -1371,7 +1350,7 @@ class Gateway(object):
         msg_list = []
         # iterate over our wind_field_map keys (the 'WeeWX' fields) and values
         # (the 'device' fields) we are interested in
-        for weewx_field, gw_field in six.iteritems(Gateway.wind_field_map):
+        for weewx_field, gw_field in Gateway.wind_field_map.items():
             # do we have a 'WeeWX' field of interest
             if weewx_field in data:
                 # we do so add some formatted output to our list
@@ -1700,7 +1679,7 @@ class GatewayService(weewx.engine.StdService, Gateway):
                 # get the next item from the collector queue, but don't dwell
                 # very long
                 queue_data = self.collector.queue.get(True, 0.5)
-            except six.moves.queue.Empty:
+            except queue.Empty:
                 # the queue is now empty, but that may be because we have
                 # already processed any queued data, log if necessary and break
                 # out of the while loop
@@ -1923,7 +1902,7 @@ class GatewayService(weewx.engine.StdService, Gateway):
             loginf("GatewayService: Converted %s data: %s" % (self.collector.device.model,
                                                               natural_sort_dict(converted_data)))
         # now we can freely augment the packet with any of our mapped obs
-        for field, data in six.iteritems(converted_data):
+        for field, data in converted_data.items():
             # Any existing packet fields, whether they contain data or are
             # None, are respected and left alone. Only fields from the
             # converted data that do not already exist in the packet are
@@ -2535,18 +2514,10 @@ class GatewayConfigurator(weewx.drivers.AbstractConfigurator):
         if _debug > 0:
             print("debug level is '%d'" % _debug)
 
-        # Now we can set up the user customized logging, but we need to handle both
-        # v3 and v4 logging. V4 logging is very easy but v3 logging requires us to
-        # set up syslog and raise our log level based on weewx.debug
-        try:
-            # assume v 4 logging
-            weeutil.logger.setup('weewx', config_dict)
-        except AttributeError:
-            # must be v3 logging, so first set the defaults for the system logger
-            syslog.openlog('weewx', syslog.LOG_PID | syslog.LOG_CONS)
-            # now raise the log level if required
-            if weewx.debug > 0:
-                syslog.setlogmask(syslog.LOG_UPTO(syslog.LOG_DEBUG))
+
+        # only support v 4 logging
+        weeutil.logger.setup('weewx', config_dict)
+
 
         # define custom unit settings used by the gateway driver
         define_units()
@@ -2603,22 +2574,23 @@ class GatewayDriver(weewx.drivers.AbstractDevice, Gateway):
         packet.
         """
 
-        # generate loop packets forever
+        # attempt to generate loop packets forever
         while True:
-            # wrap in a try to catch any instances where the queue is empty
+            # wrap in a try..except to catch any instances where the queue is
+            # empty
             try:
                 # get any data from the collector queue
                 queue_data = self.collector.queue.get(True, 10)
-            except six.moves.queue.Empty:
+            except queue.Empty:
                 # there was nothing in the queue so continue
                 pass
             else:
                 # We received something in the queue, it will be one of three
                 # things:
                 # 1. a dict containing sensor data
-                # 2. an exception
+                # 2. a tuple containing an exception and it's text
                 # 3. the value None signalling a serious error that means the
-                #    Collector needs to shut down
+                #    collector needs to shut down
 
                 # if the data has a 'keys' attribute it is a dict so must be
                 # data
@@ -2639,17 +2611,18 @@ class GatewayDriver(weewx.drivers.AbstractDevice, Gateway):
                         # wind
                         if self.debug.rain:
                             # debug.rain is set so log the 'rain' field in the
-                            # received data, if it does not exist say so
+                            # received data
                             self.log_rain_data(queue_data,
                                                'GatewayDriver: Received %s data' % self.collector.device.model)
                         if self.debug.wind:
                             # debug.wind is set so log the 'wind' fields in the
-                            # received data, if they do not exist say so
+                            # received data
                             self.log_wind_data(queue_data,
                                                'GatewayDriver: Received %s data' % self.collector.device.model)
-                    # Now start to create a loop packet. A loop packet must
+                    # Now start creating a loop packet. A loop packet must
                     # have a timestamp, if we have one (key 'datetime') in the
-                    # received data use it otherwise allocate one.
+                    # received data use it, otherwise allocate one based on the
+                    # current system time.
                     if 'datetime' in queue_data:
                         packet = {'dateTime': queue_data['datetime']}
                     else:
@@ -2710,34 +2683,33 @@ class GatewayDriver(weewx.drivers.AbstractDevice, Gateway):
                             # say so
                             self.log_wind_data(mapped_data,
                                                'GatewayDriver: Packets %s' % timestamp_to_string(packet['dateTime']))
-                    # yield the loop packet
+                    # we are done, so yield the loop packet
                     yield packet
-                # if it's a tuple then it's a tuple with an exception and
-                # exception text
+                # if it's a tuple then it's an exception with the tuple
+                # containing an exception and exception text
                 elif isinstance(queue_data, BaseException):
                     # We have an exception. The collector did not deem it
-                    # serious enough to want to shut down or it would have sent
-                    # None instead. The action we take depends on the type of
-                    # exception it is. If it's a GWIOError we need to force
-                    # the WeeWX engine to restart by raining a WeewxIOError. If
-                    # it is anything else we log it and then raise it.
+                    # serious enough to want to shut down otherwise it would
+                    # have sent None instead. The action we take depends on
+                    # the type of exception it is. If it's a GWIOError we
+                    # need to force the WeeWX engine to restart by raising a
+                    # WeewxIOError. If it is anything else we log it and then
+                    # raise it.
+
                     # first extract our exception
                     e = queue_data
                     # and process it if we have something
                     if e:
                         # is it a GWIOError
                         if isinstance(e, GWIOError):
-                            # it is so we raise a WeewxIOError, ideally would
-                            # use raise .. from .. but raise.. from .. is not
-                            # available under Python 2
-                            raise weewx.WeeWxIOError(e)
-                        else:
+                            # it is so we raise a WeewxIOError
+                            raise weewx.WeeWxIOError from e
                             # it's not so log it
-                            logerr('GatewayDriver: Caught unexpected exception %s: %s' % (e.__class__.__name__,
+                        logerr('GatewayDriver: Caught unexpected exception %s: %s' % (e.__class__.__name__,
                                                                                           e))
-                            # then raise it, WeeWX will decide what to do
-                            raise e
-                # if it's None then its a signal the Collector needs to shut
+                        # then raise it, WeeWX will decide what to do
+                        raise e
+                # if it's None then it's a signal the Collector needs to shut
                 # down
                 elif queue_data is None:
                     # if debug.loop log what we received
@@ -2748,14 +2720,14 @@ class GatewayDriver(weewx.drivers.AbstractDevice, Gateway):
                     # and raise an exception to cause the engine to shut down
                     raise GWIOError("GatewayCollector needs to shutdown")
                 # if it's none of the above (which it should never be) we don't
-                # know what to do with it so pass and wait for the next item in
+                # know what to do with it, so pass and wait for the next item in
                 # the queue
                 else:
                     pass
 
     @property
     def hardware_name(self):
-        """Return the hardware name.
+        """Return the device hardware name.
 
         Use the device model from our Collector's Station object, but if this
         is None use the driver name.
@@ -2763,8 +2735,7 @@ class GatewayDriver(weewx.drivers.AbstractDevice, Gateway):
 
         if self.collector.device.model is not None:
             return self.collector.device.model
-        else:
-            return DRIVER_NAME
+        return DRIVER_NAME
 
     @property
     def mac_address(self):
@@ -2807,8 +2778,8 @@ class Collector(object):
     """Base class for a client that polls an API."""
 
     def __init__(self):
-        # creat a queue object for passing data back to the driver/service
-        self.queue = six.moves.queue.Queue()
+        # create a Queue object for passing data to a parent process
+        self.queue = queue.Queue()
 
     def startup(self):
         pass
@@ -2900,9 +2871,10 @@ class GatewayCollector(Collector):
                                     discovery_method=discovery_method,
                                     discovery_port=discovery_port,
                                     discovery_period=discovery_period,
-                                    log_unknown_fields=log_unknown_fields, debug=debug)
+                                    log_unknown_fields=log_unknown_fields,
+                                    debug=debug)
 
-        # start off logging failures
+        # start by assuming we are logging failures
         self.log_failures = True
         # do we have a legacy WH40 and how are we handling its battery state
         # data
@@ -2926,7 +2898,7 @@ class GatewayCollector(Collector):
         collect more data. A dictionary of data is placed in the queue on each
         successful poll of the device. If an exception is raised when
         interacting with the device the exception is placed in the queue as a
-        signal to our parent that there is a problem.
+        signal to our parent there is a problem.
         """
 
         # initialise ts of last time API was polled
@@ -3067,8 +3039,7 @@ class GatewayCollector(Collector):
         self.thread = None
 
     class CollectorThread(threading.Thread):
-        """Class using a thread to collect data via the Ecowitt LAN/Wi-Fi
-        Gateway API."""
+        """Class using a thread to collect data via the local HTTP API."""
 
         def __init__(self, client):
             # initialise our parent
@@ -3437,7 +3408,7 @@ class ApiParser(object):
         """
 
         # determine the size of the rain data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our parsed data
@@ -3477,7 +3448,7 @@ class ApiParser(object):
         """
 
         # determine the size of the mulch offset data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual data
         data = response[4:4 + size - 3]
         # initialise a counter
@@ -3487,18 +3458,18 @@ class ApiParser(object):
         # iterate over the data
         while index < len(data):
             try:
-                channel = six.byte2int(data[index])
-            except TypeError:
                 channel = data[index]
+            except TypeError as te:
+                raise Exception("holy crap - what to do here?") from te
             offset_dict[channel] = {}
             try:
                 offset_dict[channel]['hum'] = struct.unpack("b", data[index + 1])[0]
             except TypeError:
-                offset_dict[channel]['hum'] = struct.unpack("b", six.int2byte(data[index + 1]))[0]
+                raise Exception( "Broken code - fix parse_get_mulch_offset")
             try:
                 offset_dict[channel]['temp'] = struct.unpack("b", data[index + 2])[0] / 10.0
             except TypeError:
-                offset_dict[channel]['temp'] = struct.unpack("b", six.int2byte(data[index + 2]))[0] / 10.0
+                raise Exception( "Broken code - fix parse_get_mulch_offset")
             index += 3
         return offset_dict
 
@@ -3537,13 +3508,13 @@ class ApiParser(object):
         # iterate over the data
         while index < len(data):
             try:
-                channel = six.byte2int(data[index])
-            except TypeError:
                 channel = data[index]
+            except TypeError:
+                raise Exception( "Broken code - fix parse_get_mulch_t_offset")
             try:
                 offset_dict[channel] = struct.unpack(">h", data[index + 1:index + 3])[0] / 10.0
             except TypeError:
-                offset_dict[channel] = struct.unpack(">h", six.int2byte(data[index + 1:index + 3]))[0] / 10.0
+                raise Exception( "Broken code - fix parse_get_mulch_t_offset 2")
 
             index += 3
         return offset_dict
@@ -3570,7 +3541,7 @@ class ApiParser(object):
         """
 
         # determine the size of the PM2.5 offset data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual data
         data = response[4:4 + size - 3]
         # initialise a counter
@@ -3580,9 +3551,9 @@ class ApiParser(object):
         # iterate over the data
         while index < len(data):
             try:
-                channel = six.byte2int(data[index])
-            except TypeError:
                 channel = data[index]
+            except TypeError:
+                raise Exception( "Broken code - fix parse_get_pm25_offset")
             offset_dict[channel] = struct.unpack(">h", data[index + 1:index + 3])[0] / 10.0
             index += 3
         return offset_dict
@@ -3607,7 +3578,7 @@ class ApiParser(object):
         """
 
         # determine the size of the WH45 offset data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our parsed data
@@ -3646,7 +3617,7 @@ class ApiParser(object):
         """
 
         # determine the size of the calibration data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our parsed data
@@ -3687,7 +3658,7 @@ class ApiParser(object):
         """
 
         # determine the size of the calibration data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our parsed data
@@ -3696,15 +3667,15 @@ class ApiParser(object):
         cal_dict['intemp'] = struct.unpack(">h", data[0:2])[0] / 10.0
         try:
             cal_dict['inhum'] = struct.unpack("b", data[2])[0]
-        except TypeError:
-            cal_dict['inhum'] = struct.unpack("b", six.int2byte(data[2]))[0]
+        except TypeError as te:
+            raise Exception("Urk: six-byte2int problem") from te
         cal_dict['abs'] = struct.unpack(">l", data[3:7])[0] / 10.0
         cal_dict['rel'] = struct.unpack(">l", data[7:11])[0] / 10.0
         cal_dict['outtemp'] = struct.unpack(">h", data[11:13])[0] / 10.0
         try:
-            cal_dict['outhum'] = struct.unpack("b", data[13])[0]
-        except TypeError:
-            cal_dict['outhum'] = struct.unpack("b", six.int2byte(data[13]))[0]
+            cal_dict['outhum'] = struct.unpack("b", data[13])[0]            
+        except TypeError as te:
+            raise Exception("Urk: six-byte2int problem") from te
         cal_dict['dir'] = struct.unpack(">h", data[14:16])[0]
         # return the parsed response
         return cal_dict
@@ -3735,7 +3706,7 @@ class ApiParser(object):
         """
 
         # determine the size of the calibration data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our final data
@@ -3745,26 +3716,26 @@ class ApiParser(object):
         # iterate over the data
         while index < len(data):
             try:
-                channel = six.byte2int(data[index])
-            except TypeError:
                 channel = data[index]
+            except TypeError:
+                raise Exception( "Broken code - fix parse_get_soilhumiad 0")
             cal_dict[channel] = {}
             try:
-                humidity = six.byte2int(data[index + 1])
-            except TypeError:
                 humidity = data[index + 1]
+            except TypeError:
+                raise Exception( "Broken code - fix parse_get_soilhumiad 1")
             cal_dict[channel]['humidity'] = humidity
             cal_dict[channel]['ad'] = struct.unpack(">h", data[index + 2:index + 4])[0]
             try:
-                ad_select = six.byte2int(data[index + 4])
-            except TypeError:
                 ad_select = data[index + 4]
+            except TypeError:
+                raise Exception( "Broken code - fix parse_get_soilhumiad 2")
             # get 'Customize' setting 1 = enable, 0 = customised
             cal_dict[channel]['ad_select'] = ad_select
             try:
-                min_ad = six.byte2int(data[index + 5])
-            except TypeError:
                 min_ad = data[index + 5]
+            except TypeError:
+                raise Exception( "Broken code - fix parse_get_soilhumiad 3")
             cal_dict[channel]['adj_min'] = min_ad
             cal_dict[channel]['adj_max'] = struct.unpack(">h", data[index + 6:index + 8])[0]
             index += 8
@@ -3790,16 +3761,16 @@ class ApiParser(object):
         """
 
         # determine the size of the system parameters data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual system parameters data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our final data
         data_dict = dict()
-        data_dict['frequency'] = six.indexbytes(data, 0)
-        data_dict['sensor_type'] = six.indexbytes(data, 1)
+        data_dict['frequency'] = data[0]
+        data_dict['sensor_type'] = data[1]
         data_dict['utc'] = self.decode_utc(data[2:6])
-        data_dict['timezone_index'] = six.indexbytes(data, 6)
-        data_dict['dst_status'] = six.indexbytes(data, 7) != 0
+        data_dict['timezone_index'] = data[6]
+        data_dict['dst_status'] = data[7] != 0
         # return the parsed response
         return data_dict
 
@@ -3819,12 +3790,12 @@ class ApiParser(object):
         """
 
         # determine the size of the system parameters data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual system parameters data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our final data
         data_dict = dict()
-        data_dict['interval'] = six.indexbytes(data, 0)
+        data_dict['interval'] = data[0]
         # return the parsed response
         return data_dict
 
@@ -3854,15 +3825,15 @@ class ApiParser(object):
         """
 
         # determine the size of the system parameters data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual system parameters data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our final data
         data_dict = dict()
         # obtain the required data from the response decoding any bytestrings
-        id_size = six.indexbytes(data, 0)
+        id_size = data[0]
         data_dict['id'] = data[1:1 + id_size].decode()
-        password_size = six.indexbytes(data, 1 + id_size)
+        password_size = data[1 + id_size]
         data_dict['password'] = data[2 + id_size:2 + id_size + password_size].decode()
         # return the parsed response
         return data_dict
@@ -3897,17 +3868,17 @@ class ApiParser(object):
         """
 
         # determine the size of the system parameters data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual system parameters data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our final data
         data_dict = dict()
         # obtain the required data from the response decoding any bytestrings
-        id_size = six.indexbytes(data, 0)
+        id_size = data[0]
         data_dict['id'] = data[1:1 + id_size].decode()
-        pw_size = six.indexbytes(data, 1 + id_size)
+        pw_size = data[1 + id_size]
         data_dict['password'] = data[2 + id_size:2 + id_size + pw_size].decode()
-        stn_num_size = six.indexbytes(data, 1 + id_size)
+        stn_num_size = data[1 + id_size]
         data_dict['station_num'] = data[3 + id_size + pw_size:3 + id_size + pw_size + stn_num_size].decode()
         # return the parsed response
         return data_dict
@@ -3938,15 +3909,15 @@ class ApiParser(object):
         """
 
         # determine the size of the system parameters data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual system parameters data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our final data
         data_dict = dict()
         # obtain the required data from the response decoding any bytestrings
-        id_size = six.indexbytes(data, 0)
+        id_size = data[0]
         data_dict['id'] = data[1:1 + id_size].decode()
-        key_size = six.indexbytes(data, 1 + id_size)
+        key_size = data[1 + id_size]
         data_dict['key'] = data[2 + id_size:2 + id_size + key_size].decode()
         # return the parsed response
         return data_dict
@@ -3985,22 +3956,22 @@ class ApiParser(object):
         """
 
         # determine the size of the system parameters data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual system parameters data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our final data
         data_dict = dict()
         # obtain the required data from the response decoding any bytestrings
         index = 0
-        id_size = six.indexbytes(data, index)
+        id_size = data[index]
         index += 1
         data_dict['id'] = data[index:index + id_size].decode()
         index += id_size
-        password_size = six.indexbytes(data, index)
+        password_size = data[index]
         index += 1
         data_dict['password'] = data[index:index + password_size].decode()
         index += password_size
-        server_size = six.indexbytes(data, index)
+        server_size = data[index]
         index += 1
         data_dict['server'] = data[index:index + server_size].decode()
         index += server_size
@@ -4008,9 +3979,9 @@ class ApiParser(object):
         index += 2
         data_dict['interval'] = struct.unpack(">h", data[index:index + 2])[0]
         index += 2
-        data_dict['type'] = six.indexbytes(data, index)
+        data_dict['type'] = data[index]
         index += 1
-        data_dict['active'] = six.indexbytes(data, index)
+        data_dict['active'] = data[index]
         # return the parsed response
         return data_dict
 
@@ -4038,17 +4009,17 @@ class ApiParser(object):
         """
 
         # determine the size of the user path data
-        size = six.indexbytes(response, 3)
+        size = response[3]
         # extract the actual system parameters data
         data = response[4:4 + size - 3]
         # initialise a dict to hold our final data
         data_dict = dict()
         index = 0
-        ecowitt_size = six.indexbytes(data, index)
+        ecowitt_size = data[index]
         index += 1
         data_dict['ecowitt_path'] = data[index:index + ecowitt_size].decode()
         index += ecowitt_size
-        wu_size = six.indexbytes(data, index)
+        wu_size = data[index]
         index += 1
         data_dict['wu_path'] = data[index:index + wu_size].decode()
         # return the parsed response
@@ -4693,12 +4664,12 @@ class Sensors(object):
                     # data
                     batt_fn = Sensors.sensor_ids[data[index:index + 1]]['batt_fn']
                     # get the raw battery state data
-                    batt = six.indexbytes(data, index + 5)
+                    batt = data[index + 5]
                     # if we are not showing all battery state data then the
                     # battery state for any sensor with signal == 0 must be set
                     # to None, otherwise parse the raw battery state data as
                     # applicable
-                    if not self.show_battery and six.indexbytes(data, index + 6) == 0:
+                    if not self.show_battery and data[index + 6] == 0:
                         batt_state = None
                     else:
                         # parse the raw battery state data
@@ -4706,8 +4677,7 @@ class Sensors(object):
                     # now add the sensor to our sensor data dict
                     self.sensor_data[address] = {'id': sensor_id,
                                                  'battery': batt_state,
-                                                 'signal': six.indexbytes(data, index + 6)
-                                                 }
+                                                 'signal': data[index + 6] }
                 else:
                     if self.debug.sensors:
                         loginf("Unknown sensor ID '%s'" % bytes_to_hex(address))
@@ -4750,7 +4720,7 @@ class Sensors(object):
         # initialise a list to hold our connected sensor addresses
         connected_list = list()
         # iterate over all sensors
-        for address, data in six.iteritems(self.sensor_data):
+        for address, data in self.sensor_data.items():
             # if the sensor ID is neither 'fffffffe' or 'ffffffff' then it
             # must be connected
             if data['id'] not in self.not_registered:
@@ -6050,12 +6020,12 @@ class GatewayApi(object):
 
         # first check the checksum is valid
         calc_checksum = self.calc_checksum(response[2:-1])
-        resp_checksum = six.indexbytes(response, -1)
+        resp_checksum = response[-1]
         if calc_checksum == resp_checksum:
             # checksum check passed, now check the response command code by
             # checkin the 3rd byte of the response matches the command code
             # that was issued
-            if six.indexbytes(response, 2) == six.byte2int(cmd_code):
+            if response[2] == cmd_code[0]:
                 # we have a valid command code in the response, so the
                 # response is valid and all we need do is return
                 return
@@ -6064,8 +6034,8 @@ class GatewayApi(object):
                 # this is most likely due to the device not understanding
                 # the command, possibly due to an old or outdated firmware
                 # version. Raise an UnknownApiCommand exception.
-                exp_int = six.byte2int(cmd_code)
-                resp_int = six.indexbytes(response, 2)
+                exp_int = cmd_code[0]
+                resp_int = response[2]
                 _msg = "Unknown command code in API response. " \
                        "Expected '%s' (0x%s), received '%s' (0x%s)." % (exp_int,
                                                                         "{:02X}".format(exp_int),
@@ -6098,7 +6068,7 @@ class GatewayApi(object):
         # initialise the checksum to 0
         checksum = 0
         # iterate over each byte in the response
-        for b in six.iterbytes(data):
+        for b in data:
             # add the byte to the running total
             checksum += b
         # we are only interested in the least significant byte
@@ -6862,7 +6832,7 @@ def define_units():
     # merge the default unit groups into weewx.units.obs_group_dict, but so we
     # don't undo any user customisation elsewhere only merge those fields that do
     # not already exits in weewx.units.obs_group_dict
-    for obs, group in six.iteritems(default_groups):
+    for obs, group in default_groups.items():
         if obs not in weewx.units.obs_group_dict.keys():
             weewx.units.obs_group_dict[obs] = group
 
@@ -6915,15 +6885,16 @@ def natural_sort_dict(source_dict):
 def bytes_to_hex(iterable, separator=' ', caps=True):
     """Produce a hex string representation of a sequence of bytes."""
 
-    # assume 'iterable' can be iterated by iterbytes and the individual
+    # assume 'iterable' can be iterated directly in python3 and the individual
     # elements can be formatted with {:02X}
     format_str = "{:02X}" if caps else "{:02x}"
     try:
-        return separator.join(format_str.format(c) for c in six.iterbytes(iterable))
+        return separator.join(format_str.format(c) for c in iterable)
     except ValueError:
         # most likely we are running python3 and iterable is not a bytestring,
         # try again coercing iterable to a bytestring
-        return separator.join(format_str.format(c) for c in six.iterbytes(six.b(iterable)))
+        #return separator.join(format_str.format(c) for c in six.iterbytes(iterable.encode
+        return separator.join(format_str.format(c) for c in iterable.encode('utf-8'))
     except (TypeError, AttributeError):
         # TypeError - 'iterable' is not iterable
         # AttributeError - likely because separator is None
@@ -8297,7 +8268,7 @@ class DirectGateway(object):
                 print()
                 print("%-10s %s" % ("Sensor", "Status"))
                 # iterate over each sensor for which we have data
-                for address, sensor_data in six.iteritems(sensors.data):
+                for address, sensor_data in sensors.data.items():
                     # the sensor id indicates whether it is disabled, attempting to
                     # register a sensor or already registered
                     if sensor_data['id'] == 'fffffffe':
@@ -8401,7 +8372,7 @@ class DirectGateway(object):
             # now build a new data dict with our converted and formatted data
             result = {}
             # iterate over the fields in our original data dict
-            for key, value in six.iteritems(live_sensor_data_dict):
+            for key, value in live_sensor_data_dict.items():
                 # we don't need usUnits in the result so skip it
                 if key == 'usUnits':
                     continue
@@ -8860,18 +8831,8 @@ def main():
     if _debug > 0:
         print("debug level is '%d'" % _debug)
 
-    # Now we can set up the user customized logging, but we need to handle both
-    # v3 and v4 logging. V4 logging is very easy but v3 logging requires us to
-    # set up syslog and raise our log level based on weewx.debug
-    try:
-        # assume v 4 logging
-        weeutil.logger.setup('weewx', config_dict)
-    except AttributeError:
-        # must be v3 logging, so first set the defaults for the system logger
-        syslog.openlog('weewx', syslog.LOG_PID | syslog.LOG_CONS)
-        # now raise the log level if required
-        if weewx.debug > 0:
-            syslog.setlogmask(syslog.LOG_UPTO(syslog.LOG_DEBUG))
+    weeutil.logger.setup('weewx_ewittold', config_dict)
+
 
     # define custom unit settings used by the gateway driver
     define_units()
