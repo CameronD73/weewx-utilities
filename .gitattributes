@@ -7,3 +7,4 @@
 *.gz	-text
 *.mwb	-text
 *.pdf	-text
+*.ttf	-text
